@@ -10,15 +10,46 @@ complete `.tex` document.
 
 ## Requirements
 
-- Python 3.10+
+- [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Anaconda
 - [Poppler](https://poppler.freedesktop.org/): `pdfinfo`, `pdftotext`, `pdftoppm`
-- A TeX distribution providing `pdflatex`
-- Python packages: `requests`, `Pillow`
+- A full TeX distribution providing `pdflatex` and the packages used by the
+  preamble (`amsmath`, `amssymb`, `amsthm`, `mathtools`, `geometry`, `hyperref`,
+  `booktabs`, `enumitem`, `lmodern`)
+
+The Python dependencies (Python 3.15.2, `requests` 2.34.2, `Pillow` 13.0.0) are
+pinned in `environment.yaml`.
+
+## Setup
+
+Create and activate the conda environment:
 
 ```bash
-python3 -m pip install -r requirements.txt
-# or, for the `pdf-to-latex` console script:
-python3 -m pip install -e .
+conda env create -f environment.yaml
+conda activate pdf_to_latex
+```
+
+Poppler and TeX Live are system tools, not conda packages in this environment.
+On Debian/Ubuntu, for example:
+
+```bash
+sudo apt install poppler-utils texlive-latex-extra texlive-fonts-recommended fonts-lmodern
+```
+
+The `texlive-core` package on conda-forge contains only the TeX binaries, not
+the LaTeX class and package files this project needs, so install a full system
+TeX Live distribution.
+
+Optional: install the `pdf-to-latex` console script into the environment:
+
+```bash
+python -m pip install -e .
+```
+
+`requirements.txt` still lists the Python packages for pip-only setups. To
+refresh an existing environment after editing `environment.yaml`:
+
+```bash
+conda env update -f environment.yaml --prune
 ```
 
 ## API key
@@ -31,11 +62,14 @@ export DEEPSEEK_API_KEY="sk-..."
 
 ## Usage
 
+Activate the environment first, then run:
+
 ```bash
-python3 main --pdf book.pdf --output book.tex
+conda activate pdf_to_latex
+python main --pdf book.pdf --output book.tex
 ```
 
-After `pip install -e .` the equivalent entry point is:
+After the optional `pip install -e .`, the equivalent entry point is:
 
 ```bash
 pdf-to-latex --pdf book.pdf --output book.tex
@@ -56,7 +90,7 @@ Useful options:
 --verbose              debug logging
 ```
 
-Run `python3 main --help` for the full list.
+Run `python main --help` for the full list.
 
 ## Output
 
@@ -86,5 +120,6 @@ Run `python3 main --help` for the full list.
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests -v
+conda activate pdf_to_latex
+python -m unittest discover -s tests -v
 ```
