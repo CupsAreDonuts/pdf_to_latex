@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdf-to-latex"
+version = "0.1.0"
+description = "Convert PDFs into compiling LaTeX with a math-aware vision model"
+requires-python = ">=3.10"
+dependencies = [
+  "requests>=2.31",
+  "Pillow>=10.0",
+]
+
+[project.scripts]
+pdf-to-latex = "pdf_to_latex.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pdf_to_latex*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

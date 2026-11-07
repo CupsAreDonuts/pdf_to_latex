@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.work/
+.*.work/
+build/
+dist/
+*.egg-info/
+*.aux
+*.log
+*.out
+*.toc
+*.pdf.tmp
+.seek
