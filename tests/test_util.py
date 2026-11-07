@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import sys
 import unittest
 
-from pdf_to_latex.util import parse_page_spec, subtract_pages
+from pdf_to_latex.util import parse_page_spec, run_command, subtract_pages
 
 
 class PageSpecTests(unittest.TestCase):
@@ -18,6 +19,22 @@ class PageSpecTests(unittest.TestCase):
 
     def test_skip_pages(self) -> None:
         self.assertEqual(subtract_pages([1, 2, 3, 4], "2-3", 10), [1, 4])
+
+
+class RunCommandTests(unittest.TestCase):
+    def test_non_utf8_output_is_decoded_with_replacement(self) -> None:
+        # pdflatex can emit Latin-1 bytes (e.g. an umlaut) on stdout; a decode
+        # error here used to fail the whole page.
+        proc = run_command(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write(b'Einf\\xfchrung\\n')",
+            ]
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("Einf", proc.stdout)
+        self.assertIn("\ufffd", proc.stdout)
 
 
 if __name__ == "__main__":

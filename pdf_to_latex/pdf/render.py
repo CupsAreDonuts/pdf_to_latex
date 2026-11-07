@@ -75,8 +75,10 @@ def preprocess_image(
     return destination
 
 
-def image_ink_ratio(path: Path, *, sample_width: int = 900) -> float:
-    """Fraction of dark pixels, used only to recognise blank scanned pages."""
+def _ink_histogram(
+    path: Path, *, sample_width: int = 900, dark_threshold: int = 200
+) -> tuple[int, int]:
+    """Return ``(dark_pixels, total_pixels)`` for a downscaled grayscale image."""
     with Image.open(path) as image:
         gray = image.convert("L")
         width, height = gray.size
@@ -84,13 +86,38 @@ def image_ink_ratio(path: Path, *, sample_width: int = 900) -> float:
             new_height = max(1, round(height * sample_width / width))
             gray = gray.resize((sample_width, new_height), Image.Resampling.BOX)
         histogram = gray.histogram()
-    dark = sum(histogram[:200])
+    dark = sum(histogram[:dark_threshold])
     total = max(sum(histogram), 1)
+    return dark, total
+
+
+def image_ink_ratio(path: Path, *, sample_width: int = 900) -> float:
+    """Fraction of dark pixels, used only to recognise blank scanned pages."""
+    dark, total = _ink_histogram(path, sample_width=sample_width)
     return dark / total
 
 
-def is_blank_image(path: Path, *, threshold: float = 0.003) -> bool:
-    return image_ink_ratio(path) < threshold
+def image_dark_pixels(path: Path, *, sample_width: int = 900) -> int:
+    """Absolute number of dark pixels in the downscaled image."""
+    dark, _ = _ink_histogram(path, sample_width=sample_width)
+    return dark
+
+
+def is_blank_image(
+    path: Path,
+    *,
+    threshold: float = 0.003,
+    min_dark_pixels: int = 100,
+    sample_width: int = 900,
+) -> bool:
+    """Recognise a blank page without dropping sparse but real content.
+
+    A ratio alone is misleading: a single word on a large page can fall well
+    below 0.3% dark pixels.  Requiring the absolute dark-pixel count to be tiny
+    as well keeps one-line title/formula pages (and their OCR call) alive.
+    """
+    dark, total = _ink_histogram(path, sample_width=sample_width)
+    return dark / total < threshold and dark < min_dark_pixels
 
 
 def image_statistics(path: Path) -> dict[str, float | int]:

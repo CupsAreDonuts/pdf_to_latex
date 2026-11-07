@@ -93,6 +93,7 @@ class DeepSeekClient:
         )
         image_sha = sha256_file(image_path)
         budget = max_tokens or self.settings.max_tokens
+        partial: tuple[str, str | None, dict[str, Any], str | None] | None = None
 
         # If the model runs out of output budget, retry with a larger budget.
         for attempt in range(3):
@@ -129,16 +130,41 @@ class DeepSeekClient:
             usage = data.get("usage") or {}
 
             if content:
-                self.cache.put(
-                    key,
-                    {
-                        "content": content,
-                        "reasoning_content": reasoning,
-                        "usage": usage,
-                        "finish_reason": finish_reason,
-                        "model": data.get("model", self.settings.model),
-                    },
-                )
+                if (
+                    finish_reason == "length"
+                    and effective_budget < self.settings.max_tokens_cap
+                ):
+                    LOGGER.warning(
+                        "Page %s slice %s hit the output-token limit at %s; "
+                        "retrying with a larger budget",
+                        page_number,
+                        slice_index,
+                        effective_budget,
+                    )
+                    partial = (content, reasoning, usage, finish_reason)
+                    budget = min(effective_budget * 2, self.settings.max_tokens_cap)
+                    continue
+
+                if finish_reason == "length":
+                    LOGGER.warning(
+                        "Page %s slice %s is truncated at the %s-token cap; "
+                        "returning partial content",
+                        page_number,
+                        slice_index,
+                        effective_budget,
+                    )
+                else:
+                    # Never cache truncated output: a later run should retry.
+                    self.cache.put(
+                        key,
+                        {
+                            "content": content,
+                            "reasoning_content": reasoning,
+                            "usage": usage,
+                            "finish_reason": finish_reason,
+                            "model": data.get("model", self.settings.model),
+                        },
+                    )
                 return OcrResult(
                     latex=content,
                     reasoning=reasoning,
@@ -162,6 +188,16 @@ class DeepSeekClient:
             if effective_budget >= self.settings.max_tokens_cap:
                 break
             budget = min(effective_budget * 2, self.settings.max_tokens_cap)
+
+        if partial is not None:
+            content, reasoning, usage, finish_reason = partial
+            return OcrResult(
+                latex=content,
+                reasoning=reasoning,
+                usage=usage,
+                finish_reason=finish_reason,
+                cached=False,
+            )
 
         raise ApiError(
             f"Model returned no final content for page {page_number} "

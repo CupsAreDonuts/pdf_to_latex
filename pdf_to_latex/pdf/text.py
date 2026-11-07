@@ -38,9 +38,27 @@ def extract_all_text(pdf: Path) -> str:
     return proc.stdout.replace("\f", "")
 
 
+_PAGE_NUMBER_LINE_RE = re.compile(r"^\s*\d{1,4}\s*$")
+_TOC_HEADING_RE = re.compile(
+    r"(?:table\s+of\s+contents|contents|inhalts?(?:verzeichnis)?|sommaire|indice)\s*:?",
+    re.IGNORECASE,
+)
+
+
 def is_blank_text(text: str) -> bool:
-    stripped = re.sub(r"\s+", "", text)
-    return len(stripped) < 20
+    """True when the text layer carries no meaningful content.
+
+    Scanned pages have no text layer at all; digital pages may carry only a
+    printed page number.  Any other alphanumeric line counts as content, no
+    matter how short, so sparse title or formula pages are not dropped.
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or _PAGE_NUMBER_LINE_RE.fullmatch(stripped):
+            continue
+        if any(character.isalnum() for character in stripped):
+            return False
+    return True
 
 
 def looks_like_toc(text: str, previous_page_was_toc: bool = False) -> bool:
@@ -48,25 +66,16 @@ def looks_like_toc(text: str, previous_page_was_toc: bool = False) -> bool:
 
     The reconstructed document should use ``\\tableofcontents`` instead of
     transcribing the stale printed page numbers.  The heuristic deliberately
-    requires either an explicit heading or a contiguous TOC run.
+    requires either an explicit heading near the top of the page or a
+    contiguous TOC run.
     """
     if not text.strip():
         return False
 
-    head = text[:1800].lower()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
     explicit_heading = any(
-        phrase in head
-        for phrase in (
-            "table of contents",
-            "contents",
-            "inhalt",
-            "inhaltverzeichnis",
-            "sommaire",
-            "indice",
-        )
+        _TOC_HEADING_RE.fullmatch(line) for line in lines[:5]
     )
-
-    lines = [line for line in text.splitlines() if line.strip()]
     dot_leader_lines = sum(
         1
         for line in lines

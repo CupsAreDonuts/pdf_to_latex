@@ -378,6 +378,11 @@ class Pipeline:
             strict=strict,
         )
         self._record_usage(plan, result)
+        if result.finish_reason == "length":
+            plan.warnings.append(
+                f"OCR output hit the token cap for slice {slice_index}; "
+                "the fragment may be truncated."
+            )
         return sanitize_latex(result.latex, page_number=plan.number)
 
     def _evaluate_and_adopt(self, plan: PagePlan, latex: str) -> None:
