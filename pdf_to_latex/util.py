@@ -36,6 +36,10 @@ def run_command(
 
     A missing executable is a dependency error; a timeout is a pipeline error.
     Callers can inspect ``returncode`` and output.
+
+    Output is decoded as UTF-8 with replacement.  Some tools (notably pdflatex)
+    emit locale-encoded bytes in their console output; a stray byte such as a
+    Latin-1 umlaut must not abort a page.
     """
     try:
         return subprocess.run(
@@ -43,6 +47,8 @@ def run_command(
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
         )
