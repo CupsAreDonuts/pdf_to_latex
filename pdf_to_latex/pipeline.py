@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
@@ -14,10 +15,15 @@ from .config import Context, Settings
 from .exceptions import ApiError, CompileError, ConfigError, PipelineError
 from .latex.assemble import assemble_document
 from .latex.compile import LatexCompiler
-from .models import CompileResult, OcrResult, PagePlan
+from .models import CompileResult, OcrResult, PagePlan, PageSlice
 from .ocr.cache import ResponseCache
 from .ocr.client import DeepSeekClient
 from .ocr.sanitize import extract_uncertain, sanitize_latex
+from .pdf.figures import (
+    FigureExtraction,
+    FigureExtractor,
+    discard_figure_placeholders,
+)
 from .pdf.info import inspect_pdf
 from .pdf.render import is_blank_image, render_page_image
 from .pdf.slices import make_slices
@@ -57,8 +63,23 @@ class Pipeline:
         )
         self.client = DeepSeekClient(settings, self.cache)
         self.compiler = LatexCompiler(
-            pdflatex=settings.pdflatex, timeout=settings.compile_timeout
+            pdflatex=settings.pdflatex,
+            timeout=settings.compile_timeout,
+            graphics_roots=[self.ctx.build_dir.resolve()],
         )
+        self.figure_extractor = (
+            FigureExtractor(
+                pdf=settings.pdf,
+                figures_dir=self.ctx.figures_dir,
+                relative_dir=settings.figure_relpath,
+                render_dir=self.ctx.pages_dir / "hires",
+                dpi=settings.figure_dpi,
+                padding=settings.figure_padding,
+            )
+            if settings.figures
+            else None
+        )
+        self._delivery_warnings: list[str] = []
         self._timer = Timer()
 
     # ------------------------------------------------------------------
@@ -78,18 +99,20 @@ class Pipeline:
 
         LOGGER.info("PDF: %s (%s pages)", info.path, info.pages)
         LOGGER.info("Processing pages: %s", _compact_ranges(pages))
-        LOGGER.info("Output: %s", self.settings.output)
+        LOGGER.info("Output bundle: %s", self.settings.bundle_dir)
+        LOGGER.info("LaTeX file: %s", self.settings.tex_path)
 
         plans = self._build_plans(info, pages)
         self._process_plans(plans, info.pages)
         tex = assemble_document(plans)
 
-        ensure_dir(self.settings.output.parent)
-        atomic_write_text(self.settings.output, tex)
+        atomic_write_text(self.settings.tex_path, tex)
         main_tex = self.ctx.build_dir / "main.tex"
         atomic_write_text(main_tex, tex)
 
         full_compile = self.compiler.compile_document(main_tex, runs=2)
+        self._prune_unused_figures(plans)
+        self._deliver_bundle(full_compile)
         if not full_compile.ok:
             LOGGER.error("Full document did not compile. See %s", main_tex)
         else:
@@ -111,7 +134,7 @@ class Pipeline:
         report = build_report(
             pdf_path=self.settings.pdf,
             pdf_pages=info.pages,
-            output_path=self.settings.output,
+            output_path=self.settings.tex_path,
             model=self.settings.model,
             plans=plans,
             full_compile_ok=full_compile.ok,
@@ -131,6 +154,8 @@ class Pipeline:
             return 1
         if structure.get("missing_fragments"):
             return 1
+        if self._delivery_warnings:
+            return 1
         if self.settings.strict and warnings:
             return 1
         return 0
@@ -142,24 +167,50 @@ class Pipeline:
         for program in ("pdfinfo", "pdftotext", "pdftoppm", "pdflatex"):
             which_or_fail(program)
 
-        if self.settings.output.suffix.lower() != ".tex":
-            raise ConfigError("--output must end in .tex")
-        if self.settings.output.exists() and not self.settings.force:
+        if not self.settings.output.name:
+            raise ConfigError("--output must name a directory or a .tex file.")
+        if (
+            self.settings.bundle_dir.exists()
+            and not self.settings.bundle_dir.is_dir()
+        ):
             raise ConfigError(
-                f"Output already exists: {self.settings.output}. "
+                f"Output bundle is not a directory: {self.settings.bundle_dir}"
+            )
+        if (
+            self.settings.output.exists()
+            and self.settings.output.is_file()
+            and self.settings.output.suffix.lower() != ".tex"
+        ):
+            raise ConfigError(
+                f"--output must be a directory or a .tex file: {self.settings.output}"
+            )
+        if self.settings.tex_path.exists() and not self.settings.force:
+            raise ConfigError(
+                f"Output already exists: {self.settings.tex_path}. "
                 "Pass --force to overwrite it."
             )
-        if self.settings.pdf.resolve() == self.settings.output.resolve():
+        if self.settings.pdf.resolve() == self.settings.tex_path.resolve():
             raise ConfigError("--pdf and --output must be different files.")
+        delivered_pdf = self.settings.tex_path.with_suffix(".pdf")
+        if self.settings.pdf.resolve() == delivered_pdf.resolve():
+            raise ConfigError(
+                "--pdf must not be the PDF that is delivered inside the output bundle."
+            )
+        if self.settings.figure_dpi <= 0:
+            raise ConfigError("--figure-dpi must be positive.")
+        if not 0.0 <= self.settings.figure_padding < 0.5:
+            raise ConfigError("--figure-padding must be between 0 and 0.5.")
 
         if self.settings.clean_workdir and self.settings.workdir.exists():
             shutil.rmtree(self.settings.workdir)
+        ensure_dir(self.settings.bundle_dir)
         for directory in (
             self.ctx.pages_dir,
             self.ctx.text_dir,
             self.ctx.cache_dir,
             self.ctx.fragments_dir,
             self.ctx.build_dir,
+            self.ctx.figures_dir,
             self.ctx.logs_dir,
         ):
             ensure_dir(directory)
@@ -168,6 +219,61 @@ class Pipeline:
             self.settings.workdir / "settings.json",
             json.dumps(_jsonable(asdict(self.settings)), indent=2) + "\n",
         )
+
+    # ------------------------------------------------------------------
+    # Output bundle
+    # ------------------------------------------------------------------
+    def _prune_unused_figures(self, plans: list[PagePlan]) -> None:
+        """Drop staged crops that the delivered document does not reference."""
+        if not self.ctx.figures_dir.exists():
+            return
+        referenced: set[str] = set()
+        for plan in plans:
+            referenced.update(
+                Path(figure.path).name for figure in plan.figures if figure.path
+            )
+            referenced.update(
+                Path(match).name
+                for match in re.findall(r"figures/[^}\s]+", plan.latex)
+            )
+        try:
+            for path in self.ctx.figures_dir.iterdir():
+                if path.is_file() and path.name not in referenced:
+                    path.unlink()
+        except OSError as exc:
+            LOGGER.warning("Could not prune unused figure files: %s", exc)
+
+    def _deliver_bundle(self, full_compile: CompileResult) -> None:
+        """Mirror figures and the compiled PDF next to the delivered .tex."""
+        target = (
+            self.settings.bundle_dir
+            / "figures"
+            / self.settings.figure_namespace
+        )
+        try:
+            if target.exists():
+                shutil.rmtree(target)
+            if any(path.is_file() for path in self.ctx.figures_dir.rglob("*")):
+                shutil.copytree(self.ctx.figures_dir, target)
+        except OSError as exc:
+            self._delivery_warnings.append(
+                f"Could not copy figures into the output bundle: {exc}"
+            )
+
+        pdf_target = self.settings.tex_path.with_suffix(".pdf")
+        try:
+            if full_compile.ok and full_compile.pdf_path is not None:
+                if pdf_target.resolve() != self.settings.pdf.resolve():
+                    shutil.copy2(full_compile.pdf_path, pdf_target)
+            elif pdf_target.exists():
+                # Do not leave a PDF from an earlier run beside a .tex that no
+                # longer compiles.
+                if pdf_target.resolve() != self.settings.pdf.resolve():
+                    pdf_target.unlink()
+        except OSError as exc:
+            self._delivery_warnings.append(
+                f"Could not copy the compiled PDF into the output bundle: {exc}"
+            )
 
     # ------------------------------------------------------------------
     # Planning / classification
@@ -265,11 +371,10 @@ class Pipeline:
                 latex = self._transcribe_image(
                     plan,
                     plan.image_path,
-                    slice_index=0,
-                    slice_count=1,
                     total_pages=total_pages,
                 )
-                self._evaluate_and_adopt(plan, latex)
+                extraction = self._resolve_figures(plan, latex, slice_=None)
+                self._evaluate_and_adopt(plan, extraction.latex, extraction)
             except ApiError as exc:
                 full_error = exc
                 plan.warnings.append(f"Full-page OCR failed: {exc}")
@@ -280,6 +385,11 @@ class Pipeline:
 
         if not self._is_good(plan):
             self._try_repair(plan, total_pages, full_error)
+
+        if not plan.latex.strip() or (
+            not plan.figures and not _has_visible_latex(plan.latex)
+        ):
+            self._insert_page_image_fallback(plan)
 
         if not self._is_good(plan):
             plan.warnings.append(
@@ -309,24 +419,25 @@ class Pipeline:
             return
 
         plan.slices = slices
-        fragments: list[str] = []
+        extractions: list[FigureExtraction] = []
         try:
             for item in slices:
                 fragment = self._transcribe_image(
                     plan,
                     item.image_path,
-                    slice_index=item.index,
-                    slice_count=item.count,
+                    slice_=item,
                     total_pages=total_pages,
                 )
-                fragments.append(fragment)
+                extractions.append(
+                    self._resolve_figures(plan, fragment, slice_=item)
+                )
         except ApiError as exc:
             plan.warnings.append(f"Slice OCR failed: {exc}")
             return
 
-        combined = "\n\n".join(fragment for fragment in fragments if fragment.strip())
-        if combined.strip():
-            self._evaluate_and_adopt(plan, combined)
+        merged = _merge_extractions(extractions)
+        if merged.latex.strip():
+            self._evaluate_and_adopt(plan, merged.latex, merged)
 
     def _try_repair(
         self,
@@ -340,8 +451,6 @@ class Pipeline:
             latex = self._transcribe_image(
                 plan,
                 plan.image_path,
-                slice_index=0,
-                slice_count=1,
                 total_pages=total_pages,
                 previous_latex=plan.latex,
                 compile_log=plan.compile_log,
@@ -352,20 +461,40 @@ class Pipeline:
             if previous_error:
                 plan.warnings.append(f"Earlier full-page error: {previous_error}")
             return
-        self._evaluate_and_adopt(plan, latex)
+        extraction = self._resolve_figures(
+            plan, latex, slice_=None, variant="repair"
+        )
+        self._evaluate_and_adopt(plan, extraction.latex, extraction)
+
+    def _insert_page_image_fallback(self, plan: PagePlan) -> None:
+        """Keep a content page in the document even when OCR produced nothing."""
+        if self.figure_extractor is None:
+            return
+        extraction = self.figure_extractor.whole_page_fragment(
+            plan.number, reason="OCR produced no LaTeX fragment"
+        )
+        if not extraction.latex:
+            plan.warnings.extend(extraction.warnings)
+            return
+        self._evaluate_and_adopt(plan, extraction.latex, extraction, force=True)
+        plan.source = "page-image"
+        plan.warnings.append(
+            "No LaTeX could be transcribed; the whole page image was inserted."
+        )
 
     def _transcribe_image(
         self,
         plan: PagePlan,
         image_path: Path,
         *,
-        slice_index: int,
-        slice_count: int,
+        slice_: PageSlice | None = None,
         total_pages: int,
         previous_latex: str | None = None,
         compile_log: str | None = None,
         strict: bool = False,
     ) -> str:
+        slice_index = slice_.index if slice_ is not None else 0
+        slice_count = slice_.count if slice_ is not None else 1
         result = self.client.transcribe(
             image_path=image_path,
             page_text=plan.text,
@@ -385,13 +514,37 @@ class Pipeline:
             )
         return sanitize_latex(result.latex, page_number=plan.number)
 
-    def _evaluate_and_adopt(self, plan: PagePlan, latex: str) -> None:
+    def _resolve_figures(
+        self,
+        plan: PagePlan,
+        latex: str,
+        *,
+        slice_: PageSlice | None,
+        variant: str = "",
+    ) -> FigureExtraction:
+        if self.figure_extractor is None:
+            return discard_figure_placeholders(latex)
+        return self.figure_extractor.resolve(
+            page=plan.number,
+            latex=latex,
+            slice_=slice_,
+            ocr_page_image=plan.image_path,
+            variant=variant,
+        )
+
+    def _evaluate_and_adopt(
+        self,
+        plan: PagePlan,
+        latex: str,
+        extraction: FigureExtraction | None = None,
+        *,
+        force: bool = False,
+    ) -> None:
         if not latex.strip():
             plan.warnings.append("Model returned an empty fragment.")
             return
         compile_result = self._compile_fragment(plan, latex)
         recall = prose_recall(plan.text, latex)
-        candidate = (latex, compile_result, recall)
 
         current_ok = bool(plan.compile_ok)
         candidate_ok = bool(compile_result.ok)
@@ -399,7 +552,8 @@ class Pipeline:
         candidate_recall = recall if recall is not None else -1.0
 
         better = (
-            not plan.latex.strip()
+            force
+            or not plan.latex.strip()
             or (candidate_ok and not current_ok)
             or (candidate_ok == current_ok and candidate_recall > current_recall + 0.02)
         )
@@ -411,6 +565,9 @@ class Pipeline:
         plan.compile_log = compile_result.log
         plan.prose_recall = recall
         plan.uncertain = extract_uncertain(latex)
+        plan.figures = list(extraction.figures) if extraction is not None else []
+        if extraction is not None:
+            plan.warnings.extend(extraction.warnings)
 
     def _compile_fragment(self, plan: PagePlan, latex: str) -> CompileResult:
         dest = self.ctx.fragments_dir / f"page-{plan.number:04d}"
@@ -455,22 +612,26 @@ class Pipeline:
     # Reporting
     # ------------------------------------------------------------------
     def _collect_stats(self, plans: list[PagePlan]) -> dict[str, int]:
-        stats = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "reasoning_tokens": 0,
-            "total_tokens": 0,
-            "ocr_calls": 0,
-            "cached_calls": 0,
-        }
+        token_keys = (
+            "prompt_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+        )
+        stats = {key: 0 for key in token_keys}
+        stats["ocr_calls"] = 0
+        stats["cached_calls"] = 0
+        stats["figures"] = 0
+        stats["figure_page_fallbacks"] = 0
         for plan in plans:
-            for key in stats:
-                if key == "ocr_calls":
-                    stats[key] += plan.ocr_calls
-                elif key == "cached_calls":
-                    stats[key] += plan.cached_calls
-                else:
-                    stats[key] += int(plan.usage.get(key, 0))
+            for key in token_keys:
+                stats[key] += int(plan.usage.get(key, 0))
+            stats["ocr_calls"] += plan.ocr_calls
+            stats["cached_calls"] += plan.cached_calls
+            stats["figures"] += len(plan.figures)
+            stats["figure_page_fallbacks"] += sum(
+                1 for figure in plan.figures if figure.source == "page"
+            )
         return stats
 
     def _collect_warnings(
@@ -488,6 +649,7 @@ class Pipeline:
                     f"Page {plan.number}: {len(plan.uncertain)} uncertain OCR token(s)."
                 )
         warnings.extend(structure.get("warnings", []))
+        warnings.extend(self._delivery_warnings)
         if not full_compile.ok:
             warnings.append("The assembled document did not compile; see the log tail.")
         else:
@@ -533,6 +695,11 @@ class Pipeline:
         LOGGER.info("  blank pages skipped: %s", blank_pages)
         LOGGER.info("  OCR calls: %s (%s cache hits)", stats["ocr_calls"], stats["cached_calls"])
         LOGGER.info("  tokens: %s", stats["total_tokens"])
+        LOGGER.info(
+            "  figures: %s (%s whole-page fallbacks)",
+            stats["figures"],
+            stats["figure_page_fallbacks"],
+        )
         LOGGER.info("  full compile: %s", "OK" if full_compile.ok else "FAILED")
         LOGGER.info("  warnings: %s", len(warnings))
         LOGGER.info("  report: %s", json_report)
@@ -565,8 +732,51 @@ def _page_manifest(plan: PagePlan) -> dict[str, Any]:
         "ocr_calls": plan.ocr_calls,
         "cached_calls": plan.cached_calls,
         "uncertain": plan.uncertain,
+        "figures": [
+            {
+                "identifier": figure.identifier,
+                "source": figure.source,
+                "path": figure.path,
+                "box": list(figure.box) if figure.box is not None else None,
+                "reason": figure.reason,
+            }
+            for figure in plan.figures
+        ],
         "warnings": plan.warnings,
     }
+
+
+def _merge_extractions(extractions: list[FigureExtraction]) -> FigureExtraction:
+    """Combine per-slice figure resolutions into one page fragment."""
+    return FigureExtraction(
+        latex="\n\n".join(item.latex for item in extractions if item.latex.strip()),
+        figures=[figure for item in extractions for figure in item.figures],
+        warnings=[warning for item in extractions for warning in item.warnings],
+    )
+
+
+_NON_CONTENT_COMMAND_RE = re.compile(
+    r"\\(?:clearpage|newpage|pagebreak|tableofcontents|maketitle"
+    r"|frontmatter|mainmatter|backmatter|vfill|hfill"
+    r"|bigskip|medskip|smallskip|noindent|indent|null|relax|sloppy|fussy)\b"
+)
+_ARGUMENT_COMMAND_RE = re.compile(
+    r"\\(?:vspace|hspace|thispagestyle|pagestyle)\*?\s*\{[^{}]*\}"
+)
+_EMPTY_ENVIRONMENT_RE = re.compile(r"\\begin\{([^{}]*)\}\s*\\end\{\1\}")
+
+
+def _has_visible_latex(latex: str) -> bool:
+    """True when a fragment contains something other than layout commands."""
+    text = re.sub(r"(?m)(?<!\\)%.*$", "", latex)
+    text = _ARGUMENT_COMMAND_RE.sub("", text)
+    for _ in range(3):
+        stripped = _EMPTY_ENVIRONMENT_RE.sub("", text)
+        if stripped == text:
+            break
+        text = stripped
+    text = _NON_CONTENT_COMMAND_RE.sub("", text)
+    return bool(text.strip())
 
 
 def _jsonable(value: Any) -> Any:

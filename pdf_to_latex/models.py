@@ -28,6 +28,18 @@ class PageSlice:
 
 
 @dataclass
+class FigureRecord:
+    """One figure placeholder resolved to an image in the output bundle."""
+
+    page: int
+    identifier: int
+    path: str  # LaTeX path relative to the document root, POSIX separators
+    source: str  # crop, page, missing
+    box: tuple[float, float, float, float] | None = None  # page-normalised
+    reason: str = ""
+
+
+@dataclass
 class PagePlan:
     number: int
     text: str = ""
@@ -44,7 +56,8 @@ class PagePlan:
     cached_calls: int = 0
     warnings: list[str] = field(default_factory=list)
     uncertain: list[str] = field(default_factory=list)
-    source: str = "ocr"  # ocr, toc, blank
+    figures: list[FigureRecord] = field(default_factory=list)
+    source: str = "ocr"  # ocr, toc, blank, page-image
 
     @property
     def is_content(self) -> bool:

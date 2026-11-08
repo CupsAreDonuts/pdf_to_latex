@@ -25,7 +25,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--pdf", required=True, type=Path, help="Input PDF file.")
     parser.add_argument(
-        "--output", required=True, type=Path, help="Output .tex file (must end in .tex)."
+        "--output",
+        required=True,
+        type=Path,
+        help=(
+            "Output bundle directory, or a .tex path whose stem names the "
+            "bundle. The bundle holds the .tex, the compiled .pdf and figures/."
+        ),
     )
     parser.add_argument(
         "--workdir",
@@ -112,6 +118,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum prose-word recall before a page is considered suspect.",
     )
     parser.add_argument(
+        "--no-figures",
+        action="store_true",
+        help="Do not extract figures; transcribe text and formulas only.",
+    )
+    parser.add_argument(
+        "--figure-dpi",
+        type=int,
+        default=300,
+        help="Resolution for cropped figure artwork (default: 300).",
+    )
+    parser.add_argument(
+        "--figure-padding",
+        type=float,
+        default=0.02,
+        help=(
+            "Padding around each figure crop, as a fraction of its own size "
+            "(default: 0.02)."
+        ),
+    )
+    parser.add_argument(
         "--compile-timeout",
         type=int,
         default=120,
@@ -130,7 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite an existing output file.",
+        help="Overwrite an existing output file in the bundle.",
     )
     parser.add_argument(
         "--clean",
@@ -182,6 +208,9 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
         workers=args.workers,
         force_slices=args.force_slices,
         min_prose_recall=args.min_prose_recall,
+        figures=not args.no_figures,
+        figure_dpi=args.figure_dpi,
+        figure_padding=args.figure_padding,
         compile_timeout=args.compile_timeout,
         pdflatex=args.pdflatex,
         pages=args.pages,

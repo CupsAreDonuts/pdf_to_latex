@@ -22,6 +22,7 @@ DOCUMENT_PREAMBLE = r"""
 
 \newcommand{\ocruncertain}[1]{\textbf{[OCR? #1]}}
 \newcommand{\proofgap}[1]{\textbf{[PROOF GAP: #1]}}
+\newcommand{\figureplaceholder}[1]{\fbox{\textit{[figure #1 unavailable]}}}
 
 \theoremstyle{plain}
 \newtheorem{theorem}{Theorem}[chapter]

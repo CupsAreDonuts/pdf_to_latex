@@ -20,11 +20,24 @@ def render_page_image(
     jpeg_quality: int = 88,
 ) -> Path:
     """Render one page to a compact JPEG and return its path."""
+    png_path = render_page_png(pdf, page, out_dir, dpi=dpi)
+    jpg_path = png_path.with_suffix(".jpg")
+    preprocess_image(png_path, jpg_path, max_width=max_width, quality=jpeg_quality)
+    return jpg_path
+
+
+def render_page_png(
+    pdf: Path,
+    page: int,
+    out_dir: Path,
+    *,
+    dpi: int = 300,
+) -> Path:
+    """Render one page to a lossless PNG and return its path."""
     which_or_fail("pdftoppm")
     ensure_dir(out_dir)
     stem = out_dir / f"page-{page:04d}"
     png_path = stem.with_suffix(".png")
-    jpg_path = stem.with_suffix(".jpg")
 
     proc = run_command(
         [
@@ -47,9 +60,7 @@ def render_page_image(
             f"Could not render page {page}:\n"
             f"{proc.stderr.strip() or proc.stdout.strip() or 'pdftoppm produced no output'}"
         )
-
-    preprocess_image(png_path, jpg_path, max_width=max_width, quality=jpeg_quality)
-    return jpg_path
+    return png_path
 
 
 def preprocess_image(

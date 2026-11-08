@@ -90,6 +90,7 @@ class DeepSeekClient:
             previous_latex=previous_latex,
             compile_log=compile_log,
             strict=strict,
+            include_figures=self.settings.figures,
         )
         image_sha = sha256_file(image_path)
         budget = max_tokens or self.settings.max_tokens
