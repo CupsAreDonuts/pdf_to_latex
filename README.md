@@ -4,9 +4,10 @@ Convert a PDF — typically a mathematics script — into a compiling LaTeX
 document using a math-aware vision model (DeepSeek-V4.1-Flash).
 
 The pipeline renders each page to an image, asks a vision model to transcribe
-the page as a LaTeX fragment (formulas included), validates each fragment by
-compiling it, repairs or slices pages when needed, and finally assembles a
-complete `.tex` document.
+the page as a LaTeX fragment (formulas included), extracts figures as cropped
+artwork from the original PDF, validates each fragment by compiling it, repairs
+or slices pages when needed, and finally assembles a complete `.tex` document
+inside a self-contained output bundle.
 
 ## Requirements
 
@@ -66,14 +67,17 @@ Activate the environment first, then run:
 
 ```bash
 conda activate pdf_to_latex
-python main --pdf book.pdf --output book.tex
+python main --pdf book.pdf --output book
 ```
 
 After the optional `pip install -e .`, the equivalent entry point is:
 
 ```bash
-pdf-to-latex --pdf book.pdf --output book.tex
+pdf-to-latex --pdf book.pdf --output book
 ```
+
+`--output` names the output bundle. `--output book` and `--output book.tex`
+both produce a `book/` directory (see [Output](#output)).
 
 Useful options:
 
@@ -83,6 +87,9 @@ Useful options:
 --workers 2            concurrent OCR requests
 --model deepseek-flash vision model name
 --dpi 200              page rendering resolution
+--figure-dpi 300       resolution for cropped figure artwork
+--figure-padding 0.02  padding around each figure crop
+--no-figures           transcribe text only, without extracting artwork
 --force                overwrite an existing output file
 --clean                delete the work directory before starting
 --strict               non-zero exit on validation warnings
@@ -94,16 +101,32 @@ Run `python main --help` for the full list.
 
 ## Output
 
-- `<output>.tex` — the assembled LaTeX document.
-- `.<output-stem>.work/` — intermediate files (use `--workdir` to move it):
-  - `pages/` rendered page images and slices
-  - `text/` extracted PDF text layers
-  - `fragments/` per-page LaTeX and compiled fragment PDFs
-  - `build/main.tex` and `build/main.pdf` — assembled document and full compile
-  - `cache/` content-addressed OCR response cache
-  - `report.json`, `report.md`, `manifest.json` — conversion diagnostics
-- Exit code `1` if the full document does not compile, a content page produced
-  no fragment, or (with `--strict`) any validation warning remains.
+`--output book` (or `--output book.tex`) creates a bundle that must be kept
+together when the document is compiled elsewhere:
+
+```text
+book/
+  book.tex            assembled LaTeX document
+  book.pdf            compiled document (when the full compile succeeds)
+  figures/book/       cropped artwork referenced by book.tex
+```
+
+Figure paths in the `.tex` are relative to the bundle root, so compile from
+inside the bundle (`cd book && pdflatex book.tex`); the same paths work in the
+internal build directory.
+
+Intermediate files live in `.<output-stem>.work/` (use `--workdir` to move it):
+
+- `pages/` rendered page images, slices and high-resolution figure renders
+- `text/` extracted PDF text layers
+- `fragments/` per-page LaTeX and compiled fragment PDFs
+- `build/main.tex`, `build/main.pdf` and `build/figures/` — assembled document,
+  full compile and figure staging area
+- `cache/` content-addressed OCR response cache
+- `report.json`, `report.md`, `manifest.json` — conversion diagnostics
+
+Exit code `1` if the full document does not compile, a content page produced
+no fragment, or (with `--strict`) any validation warning remains.
 
 ## How it works
 
@@ -111,10 +134,16 @@ Run `python main --help` for the full list.
 2. Pages with no meaningful text layer are rendered and checked for ink;
    genuinely blank pages are skipped, sparse title/formula pages are kept.
 3. Content pages are rendered to JPEG and sent to the vision model with a
-   transcription prompt and the text layer as a prose hint.
-4. Every returned fragment is sanitized and compiled with `pdflatex`; pages are
+   transcription prompt and the text layer as a prose hint. The model reports a
+   `% FIG-BOX` rectangle for every figure and emits an
+   `\includegraphics{FIG:<n>}` placeholder instead of redrawing the artwork.
+4. Each figure box is cropped from a high-resolution render of the original
+   page and written to `figures/<bundle>/`. A missing or unusable box falls back
+   to the whole page image; a page with no usable OCR output is included as a
+   whole-page figure so it is not dropped from the document.
+5. Every returned fragment is sanitized and compiled with `pdflatex`; pages are
    re-sliced or repaired when compilation or prose recall fails.
-5. Fragments are assembled with a book-class preamble, compiled as a whole, and
+6. Fragments are assembled with a book-class preamble, compiled as a whole, and
    validated against the PDF's headings and prose.
 
 ## Tests

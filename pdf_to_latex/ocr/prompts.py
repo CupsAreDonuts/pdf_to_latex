@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-PROMPT_VERSION = "2026-11-03.2"
+PROMPT_VERSION = "2026-11-08.1"
 
 _RULES = r"""
 You are a meticulous mathematical typesetting engine. Convert the visible
@@ -38,7 +38,36 @@ Output rules:
   add a comment % OCR-UNCERTAIN near it. Do not guess silently.
 - Do not wrap the fragment in \documentclass, \begin{document}, or
   \end{document}.
-- Do not use \includegraphics for the page image.
+""".strip()
+
+_FIGURE_RULES = r"""
+Figures and artwork:
+- Do not redraw figures, diagrams, plots, or photographs, and do not use TikZ
+  or pgfplots. Preserve the original artwork instead.
+- For every figure, write a marker comment immediately before its figure
+  environment:
+      % FIG-BOX <n>: x0,y0,x1,y1
+  <n> starts at 1 on the image you were given. Coordinates are integers from
+  0 to 1000 measured from the top-left corner of the image: (x0,y0) is the
+  top-left corner and (x1,y1) the bottom-right corner of the artwork. Do not
+  include the printed caption in the box; transcribe the caption separately.
+- Put the artwork in a figure environment where it appears and use
+  \includegraphics[width=0.8\linewidth]{FIG:<n>} with the same number:
+      % FIG-BOX 1: 120,340,880,620
+      \begin{figure}[htbp]
+        \centering
+        \includegraphics[width=0.8\linewidth]{FIG:1}
+        \caption{...}
+      \end{figure}
+  The pipeline replaces FIG:<n> with the cropped artwork.
+- If you cannot estimate a box, still emit \includegraphics{FIG:<n>} without a
+  FIG-BOX comment; the whole page will be used.
+- Never include the whole page image as a figure.
+""".strip()
+
+_NO_FIGURE_RULES = r"""
+- Do not use \includegraphics and do not attempt to redraw figures. Transcribe
+  text and formulas only.
 """.strip()
 
 
@@ -52,9 +81,12 @@ def build_prompt(
     previous_latex: str | None = None,
     compile_log: str | None = None,
     strict: bool = False,
+    include_figures: bool = True,
 ) -> str:
     """Build the user prompt for one page or one vertical slice."""
     parts = [_RULES, ""]
+    parts.append(_FIGURE_RULES if include_figures else _NO_FIGURE_RULES)
+    parts.append("")
 
     if slice_count > 1:
         parts.append(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Sequence
 
 from ..exceptions import CompileError, DependencyError
 from ..models import CompileResult
@@ -12,9 +13,15 @@ from .preamble import FRAGMENT_PREAMBLE
 
 
 class LatexCompiler:
-    def __init__(self, pdflatex: str = "pdflatex", timeout: int = 120) -> None:
+    def __init__(
+        self,
+        pdflatex: str = "pdflatex",
+        timeout: int = 120,
+        graphics_roots: Sequence[Path] | None = None,
+    ) -> None:
         self.pdflatex = pdflatex
         self.timeout = timeout
+        self.graphics_roots = list(graphics_roots or [])
         self.path = which_or_fail(pdflatex)
 
     def compile_fragment(
@@ -24,12 +31,29 @@ class LatexCompiler:
         tex_path = dest_dir / f"{name}.tex"
         document = (
             FRAGMENT_PREAMBLE
+            + self._graphicspath_command()
             + "\n\\begin{document}\n"
             + fragment.strip()
             + "\n\\end{document}\n"
         )
         atomic_write_text(tex_path, document)
         return self._compile(tex_path, runs=1)
+
+    def _graphicspath_command(self) -> str:
+        """Let fragments find figures relative to the build root.
+
+        Fragment sources are compiled in their own directory, while their
+        ``\\includegraphics`` paths are relative to the assembled document.
+        The command is only injected into throwaway validation documents, not
+        into the delivered ``.tex``.
+        """
+        if not self.graphics_roots:
+            return ""
+        roots = "".join(
+            "{" + root.as_posix().rstrip("/") + "/" + "}"
+            for root in self.graphics_roots
+        )
+        return f"\n\\graphicspath{{{roots}}}\n"
 
     def compile_document(self, tex_path: Path, *, runs: int = 2) -> CompileResult:
         if not tex_path.exists():

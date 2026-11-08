@@ -38,6 +38,10 @@ def build_report(
                 "ocr_calls": plan.ocr_calls,
                 "cached_calls": plan.cached_calls,
                 "slices": len(plan.slices),
+                "figures": len(plan.figures),
+                "figure_page_fallbacks": sum(
+                    1 for figure in plan.figures if figure.source == "page"
+                ),
                 "uncertain": plan.uncertain,
                 "warnings": plan.warnings,
             }
@@ -115,17 +119,22 @@ def _as_markdown(report: dict[str, Any]) -> str:
     lines.append(f"- Threshold: {prose.get('threshold')}")
     lines.append(f"- Low pages: {prose.get('low_pages', [])}")
 
+    lines.extend(["", "## Figures", ""])
+    lines.append(f"- Total: {usage.get('figures', 0)}")
+    lines.append(f"- Whole-page fallbacks: {usage.get('figure_page_fallbacks', 0)}")
+
     lines.extend(["", "## Pages", ""])
     lines.append(
-        "| page | kind | compile | recall | OCR calls | cached | slices | warnings |"
+        "| page | kind | compile | recall | OCR calls | cached | slices | figures "
+        "| warnings |"
     )
-    lines.append("|---:|---|---|---|---:|---:|---:|---|")
+    lines.append("|---:|---|---|---|---:|---:|---:|---:|---|")
     for row in report.get("pages", []):
         warnings = "; ".join(row.get("warnings", [])) or ""
         lines.append(
             f"| {row['page']} | {row['kind']} | {row['compile_ok']} | "
             f"{row['prose_recall']} | {row['ocr_calls']} | {row['cached_calls']} | "
-            f"{row['slices']} | {warnings} |"
+            f"{row['slices']} | {row.get('figures', 0)} | {warnings} |"
         )
 
     lines.extend(["", "## Warnings", ""])
