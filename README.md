@@ -1,5 +1,11 @@
 # pdf_to_latex
 
+> **Archived.** Development continues in
+> [`CupsAreDonuts/information`](https://github.com/CupsAreDonuts/information)
+> under [`utils/pdf_to_tex`](https://github.com/CupsAreDonuts/information/tree/main/utils/pdf_to_tex).
+> This repository is kept for history; its last commit is `05b3ba0`. The
+> instructions below describe the code as it was here.
+
 Convert a PDF — typically a mathematics script — into a compiling LaTeX
 document using a math-aware vision model (DeepSeek-V4.1-Flash).
 
